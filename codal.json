@@ -4,8 +4,7 @@
         "url": "https://github.com/virtualabs/codal-microbit-v2",
         "branch": "master",
         "type": "git",
-        "test_ignore": true,
-        "dev": true
+        "test_ignore": true
     } ,
     "config":{
         "NO_BLE": 1,

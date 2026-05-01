@@ -173,6 +173,31 @@ static uint32_t hops;
 uint8_t rx_buffer[254];                     /* Rx buffer used by RF to store packets. */
 uint8_t tx_buffer[254];                     /* Tx buffer used by RF to send packets. */
 
+typedef enum {
+  STATUS_IDLE = 0,
+  STATUS_SCANNING,
+  STATUS_RECOVERING,
+  STATUS_SYNCED,
+  STATUS_JAMMING,
+  STATUS_HIJACKED,
+  STATUS_ERROR
+} status_indicator_t;
+
+static volatile uint8_t g_pending_status = STATUS_IDLE;
+static volatile bool g_status_dirty = true;
+static uint8_t g_rendered_status = 0xff;
+
+/* 5x5 status icons encoded as 5-bit rows (MSB is x=0). */
+static const uint8_t STATUS_ICONS[][5] = {
+  {0x00, 0x00, 0x04, 0x00, 0x00}, /* idle */
+  {0x0e, 0x10, 0x0c, 0x02, 0x1c}, /* scanning */
+  {0x04, 0x04, 0x1f, 0x04, 0x04}, /* recovering */
+  {0x01, 0x02, 0x14, 0x08, 0x00}, /* synced */
+  {0x00, 0x1f, 0x00, 0x1f, 0x00}, /* jamming */
+  {0x11, 0x11, 0x1f, 0x11, 0x11}, /* hijacked */
+  {0x11, 0x0a, 0x04, 0x0a, 0x11}  /* error */
+};
+
 /* Packet injection buffer. */
 uint8_t packet[254];
 
@@ -195,6 +220,9 @@ static void sync_lost_track(void);
 
 static void hijack_hop_channel(void);
 static void hijack_prepare_packet(void);
+
+static void set_status(status_indicator_t status);
+static void render_status_indicator(void);
 
 void map_channel(int channel)
 {
@@ -226,6 +254,47 @@ uint8_t count_channels()
             channels++;
 
     return channels;
+}
+
+static void set_status(status_indicator_t status)
+{
+  g_pending_status = status;
+  g_status_dirty = true;
+}
+
+static void render_status_indicator(void)
+{
+  int x, y;
+  uint8_t row;
+  uint8_t status;
+
+  if (!g_status_dirty)
+    return;
+
+  status = g_pending_status;
+  if (status > STATUS_ERROR)
+    status = STATUS_ERROR;
+
+  if (status == g_rendered_status)
+  {
+    g_status_dirty = false;
+    return;
+  }
+
+  uBit.display.image.clear();
+
+  for (y = 0; y < 5; y++)
+  {
+    row = STATUS_ICONS[status][y];
+    for (x = 0; x < 5; x++)
+    {
+      if (row & (1 << (4 - x)))
+        uBit.display.image.setPixelValue(x, y, 255);
+    }
+  }
+
+  g_rendered_status = status;
+  g_status_dirty = false;
 }
 
 void hop_tick()
@@ -1203,6 +1272,7 @@ extern "C" void RADIO_IRQHandler(void)
                 if (!g_sniffer.hijacked)
                 {
                   g_sniffer.hijacked = true;
+                  set_status(STATUS_HIJACKED);
 
                   /* Notify successful hijacking. */
                   pLink->notifyHijackStatus(HIJACK_SUCCESS);
@@ -1276,6 +1346,8 @@ extern "C" void RADIO_IRQHandler(void)
 
 static void reset(void)
 {
+  set_status(STATUS_IDLE);
+
   /* Currently doing nothing =). */
   g_sniffer.action = IDLE;
 
@@ -1340,6 +1412,8 @@ static void reset(void)
 
 static void start_scanning(void)
 {
+  set_status(STATUS_SCANNING);
+
     /* Sniffer is idling. */
     g_sniffer.action = SNIFF_AA;
 
@@ -1354,6 +1428,8 @@ static void start_scanning(void)
 
 static void recover_crcinit(uint32_t accessAddress)
 {
+  set_status(STATUS_RECOVERING);
+
   g_sniffer.pkt_count = 0;
 
   recover_crc(accessAddress);
@@ -1361,7 +1437,10 @@ static void recover_crcinit(uint32_t accessAddress)
 
 static void recover_hop(uint32_t accessAddress, uint32_t crcinit, uint8_t *chm)
 {
+  set_status(STATUS_RECOVERING);
+
   reset();
+  set_status(STATUS_RECOVERING);
 
   /* Convert 5-byte chm into 37-byte array. */
   chm_to_array(chm, g_sniffer.chm);
@@ -1378,6 +1457,8 @@ static void recover_hop(uint32_t accessAddress, uint32_t crcinit, uint8_t *chm)
 
 static void recover_connection_parameters(uint32_t accessAddress)
 {
+  set_status(STATUS_RECOVERING);
+
   g_sniffer.pkt_count = 0;
 
   recover_crc(accessAddress);
@@ -1385,6 +1466,8 @@ static void recover_connection_parameters(uint32_t accessAddress)
 
 static void recover_connection_parameters(uint32_t accessAddress, uint8_t *chm)
 {
+  set_status(STATUS_RECOVERING);
+
   /* Convert 5-byte chm into 37-byte array. */
   chm_to_array(chm, g_sniffer.chm);
 
@@ -1398,6 +1481,8 @@ static void recover_connection_parameters(uint32_t accessAddress, uint8_t *chm)
 
 static void recover_connection_parameters(uint32_t accessAddress, uint8_t *chm, uint16_t hopInterval)
 {
+  set_status(STATUS_RECOVERING);
+
   /* Convert 5-byte chm into 37-byte array. */
   chm_to_array(chm, g_sniffer.chm);
 
@@ -1430,6 +1515,8 @@ static void recover_connection_parameters(uint32_t accessAddress, uint8_t *chm, 
 static void recover_prng_state_v5(uint32_t accessAddress, uint32_t crcInit, uint8_t *chm, uint16_t hopInterval)
 {
   char dbg[100];
+
+  set_status(STATUS_RECOVERING);
 
   pLink->verbose(B("Recovering PRNG state"));
 
@@ -1476,6 +1563,8 @@ static void recover_prng_state_v5(uint32_t accessAddress, uint32_t crcInit, uint
 
 static void sniff_conn_req(uint8_t adv_channel)
 {
+  set_status(STATUS_SCANNING);
+
   /**
     If advertising channel is 0xff, enable Advertisements following mode.
     Otherwise, sits on a specific channel and waits for connection requests.
@@ -1509,6 +1598,8 @@ static void sniff_conn_req(uint8_t adv_channel)
 static void sync_connection(void)
 {
   int channel;
+
+  set_status(STATUS_SYNCED);
 
   /**
    * Determine supervision timeout in number of packets.
@@ -1572,6 +1663,7 @@ static void sync_lost_track(void)
   {
     /* Send notification. */
     pLink->notifyConnectionLost();
+    set_status(STATUS_ERROR);
 
     /* Stop sniffing. */
 
@@ -1863,6 +1955,7 @@ static void hijack_hop_channel(void)
   {
     /* We failed at hijacking the connection, notify. */
     pLink->notifyHijackStatus(HIJACK_ERROR);
+    set_status(STATUS_ERROR);
 
     /* Stop hijacking. */
     g_sniffer.hijacking = false;
@@ -2190,6 +2283,8 @@ static void recover_hop_inc(void)
 
 static void follow_connection(void)
 {
+  set_status(STATUS_SYNCED);
+
     /* Stop any timer. */
     //g_sniffer.ticker.detach();
 
@@ -2261,8 +2356,11 @@ static void send_packet(uint8_t *pPacket, int size)
 
 void start_cchm(uint32_t accessAddress, uint32_t crcInit)
 {
+  set_status(STATUS_RECOVERING);
+
   /* Reset sniffer. */
   reset();
+  set_status(STATUS_RECOVERING);
 
   pLink->verbose(B("Starting cchm"));
 
@@ -2290,8 +2388,11 @@ void start_cchm_v5(uint32_t accessAddress, uint32_t crcInit)
 {
   int i;
 
+  set_status(STATUS_RECOVERING);
+
   /* Reset sniffer. */
   reset();
+  set_status(STATUS_RECOVERING);
 
   pLink->verbose(B("Starting BLE5 cchm"));
 
@@ -2698,6 +2799,10 @@ void dispatchMessage(T_OPERATION op, uint8_t *payload, int nSize, uint8_t ubflag
       {
         pLink->sendPacket(ENABLE_JAMMING, NULL, 0, PKT_COMMAND | PKT_RESPONSE);
         g_sniffer.jamming = (payload[0]==1);
+        if (g_sniffer.jamming)
+          set_status(STATUS_JAMMING);
+        else
+          set_status(STATUS_SYNCED);
       }
       else
         pLink->sendPacket(ENABLE_JAMMING, NULL, 0, 0);
@@ -2718,6 +2823,10 @@ void dispatchMessage(T_OPERATION op, uint8_t *payload, int nSize, uint8_t ubflag
           pLink->sendPacket(ENABLE_HIJACKING, NULL, 0, PKT_COMMAND | PKT_RESPONSE);
           g_sniffer.hijacking = (payload[0]==1);
           g_sniffer.jamming = (payload[0]==1);
+          if (g_sniffer.hijacking)
+            set_status(STATUS_JAMMING);
+          else
+            set_status(STATUS_SYNCED);
         }
         else
           pLink->sendPacket(ENABLE_HIJACKING, NULL, 0, 0);
@@ -2795,6 +2904,7 @@ int main() {
 
     /* Initalize Micro:Bit and serial link. */
     uBit.init();
+    uBit.display.setBrightness(32);
 
 #ifdef YOTTA_CFG_TXPIN
   #ifdef YOTTA_CFG_RXPIN
@@ -2813,9 +2923,12 @@ int main() {
 
     /* Reset radio and state. */
     reset();
+    render_status_indicator();
 
     /* Process serial inquiries. */
     while (1) {
+      render_status_indicator();
+
         /* Wait for a packet */
         nbSize = 200;
         if (pLink->readPacket(&op, packet, &nbSize, &flags))
