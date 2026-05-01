@@ -9,7 +9,7 @@
 #include <stdio.h>
 
 #define VERSION_MAJOR   0x02
-#define VERSION_MINOR   0x00
+#define VERSION_MINOR   0x01
 
 #define MAX_QUEUE_LEN   10
 #define PKT_SIZE        10  /* Access Address + 2 bytes PDU + CRC */
